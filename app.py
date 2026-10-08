@@ -15,18 +15,25 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QStackedWidget,
+    QComboBox,
+    QDialog,
     QTextEdit,
+    QTextBrowser,
 )
 from PySide6.QtCore import (
     Qt,
+    QSize,
     QTimer,
     QThread,
     Signal,
 )
+from PySide6.QtGui import QTextCursor
 
 from Get_the_Data import (
     search_companies,
     get_company_data,
+    get_market_movers,
+    chat_about_company,
 )
 from Visualization import DoughnutChart
 from Menu_Bar import SideMenuBar
@@ -69,6 +76,169 @@ class DataFetchWorker(QThread):
             })
 
 
+class MarketMoversWorker(QThread):
+    results_ready = Signal(str, int, int, dict)
+
+    def __init__(self, mover_type, days, limit):
+        super().__init__()
+        self.mover_type = mover_type
+        self.days = days
+        self.limit = limit
+
+    def run(self):
+        result = get_market_movers(self.mover_type, self.days, self.limit)
+        self.results_ready.emit(self.mover_type, self.days, self.limit, result)
+
+
+class CompanyChatWorker(QThread):
+    response_ready = Signal(dict)
+
+    def __init__(self, company_data, messages):
+        super().__init__()
+        self.company_data = company_data
+        self.messages = messages
+
+    def run(self):
+        self.response_ready.emit(chat_about_company(self.company_data, self.messages))
+
+
+class CompanyChatDialog(QDialog):
+
+    def __init__(self, company_data, parent=None):
+        super().__init__(parent)
+        self.company_data = dict(company_data)
+        self.messages = []
+        self.worker = None
+
+        self.setWindowTitle(f"AI Company Chat - {company_data['company_name']}")
+        self.resize(700, 560)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0f172a;
+                color: #f8fafc;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QLabel#chat_title {
+                color: #ffffff;
+                font-size: 21px;
+                font-weight: 700;
+            }
+            QLabel#chat_note {
+                color: #94a3b8;
+                font-size: 12px;
+            }
+            QTextBrowser {
+                background-color: #1e293b;
+                color: #f8fafc;
+                border: 1px solid #334155;
+                border-radius: 10px;
+                padding: 10px;
+                font-size: 14px;
+            }
+            QLineEdit {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                color: #f8fafc;
+                padding: 10px;
+            }
+            QPushButton {
+                background-color: #0284c7;
+                border: none;
+                border-radius: 8px;
+                color: white;
+                font-weight: 700;
+                padding: 10px 18px;
+            }
+            QPushButton:disabled {
+                background-color: #475569;
+                color: #cbd5e1;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        title = QLabel(f"{company_data['company_name']} ({company_data['symbol']})")
+        title.setObjectName("chat_title")
+        note = QLabel(
+            "Ask about this company. Answers use the company analysis loaded in the app."
+        )
+        note.setObjectName("chat_note")
+        self.transcript = QTextBrowser()
+        self.transcript.setOpenExternalLinks(False)
+        self.transcript.setPlainText(
+            "AI company chat is ready. Ask a question about the company, its business, "
+            "or the available analysis."
+        )
+
+        input_row = QHBoxLayout()
+        self.prompt_input = QLineEdit()
+        self.prompt_input.setPlaceholderText("Ask a question about this company...")
+        self.prompt_input.returnPressed.connect(self.send_message)
+        self.send_button = QPushButton("Send")
+        self.send_button.clicked.connect(self.send_message)
+        input_row.addWidget(self.prompt_input, 1)
+        input_row.addWidget(self.send_button)
+
+        layout.addWidget(title)
+        layout.addWidget(note)
+        layout.addWidget(self.transcript, 1)
+        layout.addLayout(input_row)
+
+    def send_message(self):
+        prompt = self.prompt_input.text().strip()
+        if not prompt or (self.worker and self.worker.isRunning()):
+            return
+
+        self.messages.append({"role": "user", "content": prompt})
+        self._append_transcript("You", prompt)
+        self.prompt_input.clear()
+        self.prompt_input.setEnabled(False)
+        self.send_button.setEnabled(False)
+        self._append_transcript("AI", "Thinking...")
+
+        self.worker = CompanyChatWorker(self.company_data, list(self.messages))
+        self.worker.response_ready.connect(self._on_response)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.start()
+
+    def _append_transcript(self, speaker, message):
+        current = self.transcript.toPlainText()
+        self.transcript.setPlainText(f"{current}\n\n{speaker}:\n{message}")
+        self.transcript.moveCursor(self.transcript.textCursor().MoveOperation.End)
+
+    def _on_response(self, result):
+        current = self.transcript.toPlainText()
+        if current.endswith("AI:\nThinking..."):
+            current = current[:-len("AI:\nThinking...")].rstrip()
+        if result.get("success"):
+            answer = result["answer"]
+            assistant_message = {"role": "assistant", "content": answer}
+            if "reasoning_details" in result:
+                assistant_message["reasoning_details"] = result["reasoning_details"]
+            self.messages.append(assistant_message)
+            self.transcript.setPlainText(f"{current}\n\nAI:\n{answer}")
+        else:
+            if self.messages and self.messages[-1]["role"] == "user":
+                self.messages.pop()
+            self.transcript.setPlainText(
+                f"{current}\n\nError:\n{result.get('message', 'The AI request failed.')}"
+            )
+        self.transcript.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _on_worker_finished(self):
+        self.prompt_input.setEnabled(True)
+        self.send_button.setEnabled(True)
+        self.prompt_input.setFocus()
+        if self.worker:
+            self.worker.deleteLater()
+            self.worker = None
+
+    def closeEvent(self, event):
+        if self.worker and self.worker.isRunning():
+            self.worker.wait()
+        event.accept()
+
+
 # ==========================================================
 # Page 1: Stock Market Analysis Page
 # ==========================================================
@@ -79,8 +249,10 @@ class StockAnalysisPage(QWidget):
         super().__init__()
 
         self.selected_symbol = None
+        self.current_company_data = None
         self.search_worker = None
         self.data_worker = None
+        self.workers = []
 
         self.search_timer = QTimer()
         self.search_timer.setSingleShot(True)
@@ -254,8 +426,19 @@ class StockAnalysisPage(QWidget):
         search_button.setMinimumWidth(130)
         search_button.clicked.connect(self.search_company)
 
+        self.company_explainer_button = QPushButton("💬")
+        self.company_explainer_button.setToolTip("Chat with AI about the analyzed company")
+        self.company_explainer_button.setAccessibleName("Chat with AI about the analyzed company")
+        self.company_explainer_button.setFixedSize(54, 54)
+        self.company_explainer_button.setStyleSheet(
+            "font-size: 20px; padding: 0; border-radius: 27px;"
+        )
+        self.company_explainer_button.setEnabled(False)
+        self.company_explainer_button.clicked.connect(self.show_company_explainer)
+
         search_layout.addWidget(self.search_bar, 1)
         search_layout.addWidget(search_button, 0)
+        search_layout.addWidget(self.company_explainer_button, 0)
 
         self.suggestions = QListWidget()
         self.suggestions.setMaximumHeight(210)
@@ -418,6 +601,8 @@ class StockAnalysisPage(QWidget):
 
     def on_search_text_changed(self, text):
         self.selected_symbol = None
+        self.current_company_data = None
+        self.company_explainer_button.setEnabled(False)
         text = text.strip()
         self.suggestions.clear()
 
@@ -434,7 +619,7 @@ class StockAnalysisPage(QWidget):
 
         self.search_worker = SearchWorker(query)
         self.search_worker.results_ready.connect(self.display_suggestions)
-        self.search_worker.start()
+        self._start_worker(self.search_worker)
 
     def display_suggestions(self, companies):
         self.suggestions.clear()
@@ -470,6 +655,13 @@ class StockAnalysisPage(QWidget):
         self.suggestions.hide()
         self.search_bar.setCursorPosition(len(self.search_bar.text()))
 
+    def open_company_analysis(self, symbol):
+        self.search_timer.stop()
+        self.suggestions.hide()
+        self.search_bar.setText(symbol)
+        self.selected_symbol = symbol
+        self.search_company()
+
     def search_company(self):
         text = self.search_bar.text().strip()
         if not text:
@@ -492,6 +684,8 @@ class StockAnalysisPage(QWidget):
 
         self.status_label.setText("Loading market and company data...")
         self.status_label.show()
+        self.current_company_data = None
+        self.company_explainer_button.setEnabled(False)
         self.header_widget.hide()
         self.verdict_card.hide()
         self.metrics_widget.hide()
@@ -500,7 +694,23 @@ class StockAnalysisPage(QWidget):
 
         self.data_worker = DataFetchWorker(search_value)
         self.data_worker.data_ready.connect(self.on_data_retrieved)
-        self.data_worker.start()
+        self._start_worker(self.data_worker)
+
+    def _start_worker(self, worker):
+        worker.finished.connect(lambda worker=worker: self._discard_worker(worker))
+        self.workers.append(worker)
+        worker.start()
+
+    def _discard_worker(self, worker):
+        if worker in self.workers:
+            self.workers.remove(worker)
+        worker.deleteLater()
+
+    def stop_workers(self):
+        self.search_timer.stop()
+        for worker in self.workers[:]:
+            worker.wait()
+        self.workers.clear()
 
     def on_data_retrieved(self, result):
         if not result["success"]:
@@ -508,6 +718,8 @@ class StockAnalysisPage(QWidget):
             return
 
         data = result["data"]
+        self.current_company_data = data
+        self.company_explainer_button.setEnabled(True)
 
         # Company Header
         self.company_name_lbl.setText(data["company_name"])
@@ -574,6 +786,14 @@ class StockAnalysisPage(QWidget):
         self.metrics_widget.show()
         self.info_card.show()
         self.chart.show()
+
+    def show_company_explainer(self):
+        data = self.current_company_data
+        if not data:
+            return
+
+        dialog = CompanyChatDialog(data, self)
+        dialog.exec()
 
 
 # ==========================================================
@@ -664,6 +884,243 @@ class FuturesOptionsPage(QWidget):
         layout.addWidget(lbl)
 
 
+class TrendingResultRow(QWidget):
+    company_clicked = Signal(str)
+
+    def __init__(self, rank, stock):
+        super().__init__()
+        self.symbol = stock["symbol"]
+        self.setMinimumHeight(64)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("background-color: transparent;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(3)
+
+        heading = QHBoxLayout()
+        company_name = stock.get("name") or self.symbol
+        company = QLabel(f"{rank:>2}.  {company_name} ({self.symbol})")
+        company.setStyleSheet("color: #f8fafc; font-weight: 600;")
+        change = stock["change_percent"]
+        change_label = QLabel(f"{change:+.2f}%")
+        color = "#22c55e" if change > 0 else "#ef4444" if change < 0 else "#94a3b8"
+        change_label.setStyleSheet(f"color: {color}; font-weight: 700;")
+        heading.addWidget(company, 1)
+        heading.addWidget(change_label)
+
+        price = QLabel(f"      Price: {stock['price']:.2f}")
+        price.setStyleSheet("color: #94a3b8;")
+        layout.addLayout(heading)
+        layout.addWidget(price)
+
+        for label in (company, change_label, price):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.company_clicked.emit(self.symbol)
+        super().mousePressEvent(event)
+
+
+# ==========================================================
+# Page 4: Trending Stocks
+# ==========================================================
+
+class TrendingPage(QWidget):
+    company_selected = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.workers = []
+        self.sections = {}
+
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #0f172a;
+                color: #f8fafc;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QLabel#title {
+                color: #ffffff;
+                font-size: 30px;
+                font-weight: 800;
+            }
+            QLabel#subtitle, QLabel#status {
+                color: #94a3b8;
+                font-size: 14px;
+            }
+            QLabel#section_title {
+                font-size: 19px;
+                font-weight: 700;
+            }
+            QFrame#trend_card {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 16px;
+            }
+            QComboBox {
+                background-color: #0f172a;
+                border: 1px solid #475569;
+                border-radius: 8px;
+                color: #f8fafc;
+                padding: 8px 12px;
+                min-width: 120px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e293b;
+                color: #f8fafc;
+                selection-background-color: #0284c7;
+            }
+            QListWidget {
+                background-color: #0f172a;
+                border: 1px solid #334155;
+                border-radius: 10px;
+                color: #f8fafc;
+                padding: 6px;
+                font-size: 14px;
+            }
+            QListWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid #1e293b;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(36, 30, 36, 28)
+        layout.setSpacing(12)
+
+        title = QLabel("Trending Stocks")
+        title.setObjectName("title")
+        subtitle = QLabel(
+            "Compare recent performance. Rankings use Yahoo Finance's current daily mover lists."
+        )
+        subtitle.setObjectName("subtitle")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(18)
+        columns.addWidget(self._create_mover_card("gainers", "Top Gainers", "#22c55e"))
+        columns.addWidget(self._create_mover_card("losers", "Top Losers", "#ef4444"))
+        layout.addLayout(columns, 1)
+
+        self.periods = [("1 day", 1), ("5 days", 5), ("10 days", 10), ("30 days", 30), ("90 days", 90)]
+        for section in self.sections.values():
+            for label, days in self.periods:
+                section["period"].addItem(label, days)
+            section["period"].currentIndexChanged.connect(
+                lambda _index, mover_type=section["type"]: self._load_movers(mover_type)
+            )
+            for count in (5, 10, 20, 30):
+                section["count"].addItem(str(count), count)
+            section["count"].setCurrentIndex(1)
+            section["count"].currentIndexChanged.connect(
+                lambda _index, mover_type=section["type"]: self._load_movers(mover_type)
+            )
+
+    def _create_mover_card(self, mover_type, title, accent):
+        card = QFrame()
+        card.setObjectName("trend_card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 22)
+        card_layout.setSpacing(14)
+
+        heading = QLabel(title)
+        heading.setObjectName("section_title")
+        heading.setStyleSheet(f"color: {accent};")
+
+        controls = QHBoxLayout()
+        period_label = QLabel("Period")
+        period = QComboBox()
+        count_label = QLabel("Companies")
+        count = QComboBox()
+        controls.addWidget(period_label)
+        controls.addWidget(period)
+        controls.addWidget(count_label)
+        controls.addWidget(count)
+        controls.addStretch()
+
+        status = QLabel("Select this menu item to load market data.")
+        status.setObjectName("status")
+        status.setWordWrap(True)
+        results = QListWidget()
+        results.setMinimumHeight(420)
+        results.itemClicked.connect(self._open_company)
+
+        card_layout.addWidget(heading)
+        card_layout.addLayout(controls)
+        card_layout.addWidget(status)
+        card_layout.addWidget(results, 1)
+
+        self.sections[mover_type] = {
+            "type": mover_type,
+            "period": period,
+            "count": count,
+            "status": status,
+            "results": results,
+        }
+        return card
+
+    def refresh(self):
+        for mover_type in self.sections:
+            self._load_movers(mover_type)
+
+    def _load_movers(self, mover_type):
+        section = self.sections[mover_type]
+        days = section["period"].currentData()
+        limit = section["count"].currentData()
+        section["status"].setText(f"Loading {mover_type}...")
+        section["results"].clear()
+
+        worker = MarketMoversWorker(mover_type, days, limit)
+        worker.results_ready.connect(self._display_movers)
+        worker.finished.connect(lambda worker=worker: self._discard_worker(worker))
+        self.workers.append(worker)
+        worker.start()
+
+    def _discard_worker(self, worker):
+        if worker in self.workers:
+            self.workers.remove(worker)
+        worker.deleteLater()
+
+    def stop_workers(self):
+        for worker in self.workers[:]:
+            worker.wait()
+        self.workers.clear()
+
+    def _display_movers(self, mover_type, days, limit, result):
+        section = self.sections[mover_type]
+        if section["period"].currentData() != days or section["count"].currentData() != limit:
+            return
+
+        section["results"].clear()
+        if not result.get("success"):
+            section["status"].setText(result.get("message", "Market data could not be loaded."))
+            return
+
+        if not result["results"]:
+            section["status"].setText(f"No {mover_type} found over {days} trading day(s).")
+            return
+
+        section["status"].setText(
+            f"Best {len(result['results'])} results over {days} trading day(s)."
+        )
+        for index, stock in enumerate(result["results"], start=1):
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, stock["symbol"])
+            row = TrendingResultRow(index, stock)
+            row.company_clicked.connect(self.company_selected.emit)
+            section["results"].addItem(item)
+            section["results"].setItemWidget(item, row)
+            item.setSizeHint(QSize(0, max(64, row.sizeHint().height())))
+
+    def _open_company(self, item):
+        symbol = item.data(Qt.ItemDataRole.UserRole)
+        if symbol:
+            self.company_selected.emit(symbol)
+
+
 # ==========================================================
 # Main Window Container
 # ==========================================================
@@ -691,9 +1148,11 @@ class MainWindow(QWidget):
         self.login_page = LoginPage()
         self.stock_page = StockAnalysisPage()
         self.fno_page = FuturesOptionsPage()
+        self.trending_page = TrendingPage()
 
         self.stacked_widget.addWidget(self.login_page)
         self.stacked_widget.addWidget(self.stock_page)
+        self.stacked_widget.addWidget(self.trending_page)
         self.stacked_widget.addWidget(self.fno_page)
 
         self.stacked_widget.setCurrentWidget(self.stock_page)
@@ -701,14 +1160,28 @@ class MainWindow(QWidget):
         main_layout.addWidget(self.stacked_widget, 1)
 
         self.sidebar.menu_changed.connect(self.switch_page)
+        self.trending_page.company_selected.connect(self.open_company_analysis)
+
+    def closeEvent(self, event):
+        self.stock_page.stop_workers()
+        self.trending_page.stop_workers()
+        event.accept()
 
     def switch_page(self, page_name):
         if page_name == "Login":
             self.stacked_widget.setCurrentWidget(self.login_page)
         elif page_name == "Stock Market Analysis":
             self.stacked_widget.setCurrentWidget(self.stock_page)
+        elif page_name == "Trending":
+            self.stacked_widget.setCurrentWidget(self.trending_page)
+            self.trending_page.refresh()
         elif page_name == "Futures & Options (Derivatives)":
             self.stacked_widget.setCurrentWidget(self.fno_page)
+
+    def open_company_analysis(self, symbol):
+        self.sidebar.set_active_page("Stock Market Analysis")
+        self.stacked_widget.setCurrentWidget(self.stock_page)
+        self.stock_page.open_company_analysis(symbol)
 
 
 # ==========================================================

@@ -8,6 +8,7 @@ This project focuses on:
 - Searching for a company
 - Viewing company information
 - Displaying financial and performance trends
+- Comparing top gainers and losers over selectable trading-day periods
 - Visualizing data with charts such as doughnut charts
 
 ## Application Layout
@@ -42,6 +43,7 @@ Scrollable Analysis Area
 ### 2. Company Analysis
 - Overview of stock/company performance
 - Market-related insights
+- AI chat button answers questions about the currently analyzed company using its profile and metrics
 
 ### 3. Company Information
 - Basic company details
@@ -50,6 +52,12 @@ Scrollable Analysis Area
 ### 4. Visual Data Representation
 - Doughnut chart for segmented analysis
 - Helps compare key metrics visually
+
+### 5. Trending
+- Shows separate Top Gainers and Top Losers lists
+- Each list has its own 1, 5, 10, 30, or 90 trading-day selector
+- Each list independently selects 5, 10, 20, or 30 companies
+- Yahoo Finance's current daily mover lists are ranked by the selected historical return
 
 ## Purpose
 The project is designed to provide a simple and structured dashboard for analyzing a company within the stock market context.
@@ -62,3 +70,8 @@ The project is designed to provide a simple and structured dashboard for analyzi
 
 ## Notes
 This README reflects the current UI and feature structure of the application and can be expanded as the project grows.
+
+## AI Chat Configuration
+The company chat uses OpenRouter's `apodex/apodex-1.1-mini:free` model with reasoning enabled. Put a newly generated API key in the `OPENROUTER_API_KEY` entry in the app-local `.env` file. This file is ignored by Git. Do not use keys shared in chat or commit `.env`.
+
+If `.env` is missing, create it beside `app.py` with `OPENROUTER_API_KEY=your-replacement-key`.
