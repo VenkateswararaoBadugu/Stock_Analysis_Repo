@@ -104,6 +104,7 @@ class SideMenuBar(QWidget):
         self.menu_items = [
             ("🔑  Login", "Login"),
             ("📊  Stock Market Analysis", "Stock Market Analysis"),
+            ("🔥  Trending", "Trending"),
             ("⚡  Futures & Options (Derivatives)", "Futures & Options (Derivatives)")
         ]
 
